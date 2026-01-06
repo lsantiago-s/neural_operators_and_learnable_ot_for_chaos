@@ -1,5 +1,7 @@
 import torch
+import pickle
 import numpy as np
+from typing import Any
 from torch.utils.data import Dataset
 from .transforms import Transform
 
@@ -15,6 +17,7 @@ class DynamicalSystemDataset(Dataset):
             device: str | torch.device,
             dtype: torch.dtype,
             transforms : list[Transform] | None = None,
+            return_meta: bool = False,
     ):
         self.data = np.load(npz_path)
         self.ids = self.data['ids']
@@ -22,9 +25,17 @@ class DynamicalSystemDataset(Dataset):
         self.rng = torch.Generator()
         self.device = device
         self.dtype = dtype
+        self.return_meta = return_meta
 
     def __len__(self) -> int:
         return len(self.ids)
+    
+    def _load_meta(self, traj_id: str) -> dict[str, Any]:
+        key = f"meta_{traj_id}"
+        if key not in self.data:
+            return {}
+        raw = self.data[key] 
+        return pickle.loads(raw.tobytes())
     
     def __getitem__(self, idx: int) -> tuple[int, torch.Tensor, torch.Tensor]:
         """ 
@@ -51,8 +62,14 @@ class DynamicalSystemDataset(Dataset):
         return traj_id, traj, params
 
 def collate_fn(batch: list[tuple]) -> tuple:
-    indices, trajs, params = zip(*batch)
-    trajs_batch = torch.stack(trajs, dim=0)  # (batch_size, time_steps, spatial_dim)
-    params_batch = torch.stack(params, dim=0)  # (batch_size, param_dim)
+    if len(batch[0]) == 3:
+        indices, trajs, params = zip(*batch)
+        trajs_batch = torch.stack(trajs, dim=0)  # (batch_size, time_steps, spatial_dim)
+        params_batch = torch.stack(params, dim=0)  # (batch_size, param_dim)
+        return list(indices), trajs_batch, params_batch
+
+    indices, trajs, params, metas = zip(*batch)
+    trajs_batch = torch.stack(trajs, dim=0)
+    params_batch = torch.stack(params, dim=0)
     
-    return list(indices), trajs_batch, params_batch
+    return list(indices), trajs_batch, params_batch, list(metas)

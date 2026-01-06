@@ -1,11 +1,12 @@
 import logging
 import numpy as np
+from typing import Any
 from pathlib import Path
-from config import DataGenConfig
 from scipy.integrate import solve_ivp
 from collections.abc import Callable
-from dynamical_systems import IVP_MAP
-from typing import Any
+from pipeline.datagen.config import DataGenConfig
+from pipeline.datagen.dynamical_systems import IVP_MAP
+from pipeline.datagen.postprocessing import crop_ok_lorenz63_two_lobes
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +20,6 @@ class DataGenerator:
         self.config = config
         self.rng = np.random.default_rng()
         self.ode_func: Callable = IVP_MAP[config.experiment]
-
     def sample_parameters(self) -> np.ndarray:
         params = []
         for _, (low, high) in self.config.param_ranges.items():
@@ -57,12 +57,81 @@ class DataGenerator:
         traj = self._solve_ivp(params)
         traj_id = f"{idx:06d}"
         return traj_id, traj, params
-    
-    def generate_dataset(self, progress: bool=True) -> list[tuple[str, np.ndarray[Any, Any], np.ndarray[Any, Any]]]:
+
+    def generate_dataset(self, progress: bool=True):
+        if self.config.sampling_mode == "independent":
+            return self._generate_independent(progress)
+        return self._generate_crops(progress)
+
+    def _generate_independent(self, progress: bool = True):
         iterator = range(self.config.n_samples)
         if progress:
             from tqdm import tqdm
             iterator = tqdm(iterator, desc="Generating trajectories")
 
-        results = [self.generate_one(i) for i in iterator]
+        return [self.generate_one(i) for i in iterator]
+
+    def _generate_crops(self, progress: bool = True):
+        params = self.sample_parameters()
+        full_traj = self._solve_ivp(params)  # (T, D)
+
+        logger.info("Extracting crops from full trajectory of shape: %s", full_traj.shape)
+
+        start_idx = int(self.config.transient_cutoff or 0)
+        usable = full_traj[start_idx:, :]
+
+        crop_len = int(self.config.crop_length or 0)
+        max_start = usable.shape[0] - crop_len
+        if max_start <= 0:
+            raise ValueError("Not enough usable timesteps for cropping")
+
+        v = self.config.crop_validator
+        want_validate = v is not None and str(v.get("type", "")).strip() != ""
+
+        results: list[tuple[str, np.ndarray, np.ndarray, dict[str, Any]]] = []
+        iterator = range(self.config.n_samples)
+        if progress:
+            from tqdm import tqdm
+            iterator = tqdm(iterator, desc="Extracting crops")
+
+        tries = 0
+        max_tries = 50 * self.config.n_samples  # safety cap
+
+        i = 0
+        while i < self.config.n_samples:
+            if tries > max_tries:
+                raise ValueError("Failed to find enough valid crops. Relax validator or increase t_end/crop_length.")
+            tries += 1
+
+            s = int(self.rng.integers(0, max_start + 1))
+            crop = usable[s : s + crop_len, :]
+
+            ok = True
+            meta: dict[str, Any] = {
+                "type": "crop",
+                "start_idx": s + start_idx,
+                "end_idx": s + start_idx + crop_len,
+                "burn_in": start_idx,
+                "crop_len": crop_len,
+            }
+
+            if want_validate:
+                if v is not None and v["type"] == "lorenz63_two_lobes":
+                    ok = crop_ok_lorenz63_two_lobes(
+                        crop,
+                        axis=int(v.get("axis", 0)),
+                        min_switches=int(v.get("min_switches", 2)),
+                        min_lobe_fraction=float(v.get("min_lobe_fraction", 0.15)),
+                    )
+                else:
+                    raise ValueError(f"Unknown crop_validator.type: {v['type']}")
+                meta["validator"] = v["type"]
+
+            if not ok:
+                continue
+
+            traj_id = f"{i:06d}"
+            results.append((traj_id, crop, params, meta))
+            i += 1
+
         return results
