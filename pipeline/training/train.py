@@ -56,7 +56,7 @@ def train(train_config: dict, use_wandb: bool):
     if use_wandb: 
         wandb.init(
             project="chaos-emulator",
-            name=f"{exp_name[:-9]}",
+            name=f"{exp_name}",
             config=config
         )
 
@@ -140,7 +140,7 @@ def train(train_config: dict, use_wandb: bool):
         num_batches = 0
         pbar = tqdm(train_dataloader, desc=f'Epoch {epoch+1}/{exp_cfg.epochs}')
 
-        use_ot = (epoch > exp_cfg.ot_delay)
+        use_ot = (epoch > exp_cfg.ot_delay) and (λ_ot > 0)
         step_f_φ = optimize_ot(epoch=epoch, ot_delay=exp_cfg.ot_delay, summary_step_freq=exp_cfg.summary_step_freq)
 
         for batch_idx, (_, u, param) in enumerate(pbar):

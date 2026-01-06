@@ -71,13 +71,15 @@ def eval_exp(
         elif summary_type == 'projection':
             from models.summary.projection_summary import ProjectionSummaryStats
             summary = ProjectionSummaryStats(**checkpoint['summary_config']).to(dtype=dtype, device=device)
+            summary.load_state_dict(checkpoint['summary_state_dict'])
         else:
             summary = MLPSummaryStats(**checkpoint['summary_config']).to(dtype=dtype, device=device)
+            summary.load_state_dict(checkpoint['summary_state_dict'])
     else:
             from models.summary.identity_summary import IdentitySummaryStats
             summary = IdentitySummaryStats().to(dtype=dtype, device=device)
 
-    summary.load_state_dict(checkpoint['summary_state_dict'])
+
     emulator.load_state_dict(checkpoint['model_state_dict'])
 
     # Load data
@@ -89,7 +91,10 @@ def eval_exp(
     u_true = torch.tensor(dataset['traj_000000'][None, :T, :], device=device, dtype=dtype)  # [B, T, D]
 
     noise = checkpoint['train_config']['noise_level'] * u_true.std(dim=1, keepdim=True) * torch.randn_like(u_true, device=device, dtype=dtype) # check this
-    u_true = u_true + noise
+
+    if noise is not None and checkpoint['train_config']['noise_level'] > 0.0:
+        u_true = u_true + noise
+
 
     # Generate prediction
     u_pred = eval_rollout(emulator, u_true, param, rollout_steps=T)
@@ -124,10 +129,10 @@ def eval_exp(
         if summary_type == 'projection':
             f.writelines(f"Projected state: {index_to_state[state_index]}\n")
         f.writelines(f"OT: {ot_or_noot}\n")
-        f.writelines(f"Noise: {noisy_or_clean}\n")
-        f.writelines(f"MSE: {mse}\n")
+        f.writelines(f"Noise: {'clean' if not noisy_or_clean else checkpoint['train_config']['noise_level']}\n")
+        # f.writelines(f"MSE: {mse}\n")
         f.writelines(f"Histogram Error: {errors['histogram_error']}\nEnergy Spec. Error: {errors['energy_spectrum']}\n")
-
+        f.writelines(f"IPM: {errors['ipm']}\n")
 
     u_label = r'u(t)'
     u_comp_labels = [r'$x(t)$', r'$y(t)$', r'$z(t)$']
@@ -150,7 +155,7 @@ def eval_exp(
     figures.append(plot_l63_full_single(u_true[0], plotted_variable=u_label, u_comp_labels=u_comp_labels))
     figures.append(plot_l63_full_double(u_pred[0], u_true[0], plotted_variable_1=u_label + " True", plotted_variable_2=u_label + " Predicted", first=u_pred_comp_labels, second=u_true_comp_labels))
 
-    if s_true.shape[2] == 3:
+    if s_true.shape[2] == 3 and ot_or_noot == 'ot':
         figures.append(plot_l63_full_single(s_true[0], plotted_variable=s_label, s_comp_labels=s_comp_labels))
         figures.append(plot_l63_full_double(s_pred[0], s_true[0], plotted_variable_1=s_label + " True", plotted_variable_2=s_label + " Predicted", first=s_pred_comp_labels, second=s_true_comp_labels))
         figures.append(plot_l63_full_double(s_true[0], u_true[0], plotted_variable_1=u_label, plotted_variable_2=s_label, first=u_comp_labels, second=s_comp_labels))
@@ -172,7 +177,11 @@ def eval_exp(
     config['pixel_width'] = 1920*2
     config['frame_rate'] = 60
 
-    scene = Lorenz63(u_true[0], u_pred[0], s_true[0][:, :, state_index] if summary_type == 'projection' else s_true[0])
+    scene = Lorenz63(
+        u_true[0],
+        u_pred[0],  
+        np.concatenate([ np.zeros((s_true.shape)), np.zeros((s_true.shape)), s_true], axis=2)[0] \
+              if summary_type == 'projection' else s_true[0])
     scene.render()
 
     video_path = Path(f"{output_path}/lorenz63.mp4")
@@ -232,8 +241,8 @@ def eval_exp(
         run.finish()
 
 if __name__ == "__main__":
-    dataset_path = 'data/lorenz63/9bda2e47/test_data.npz'
-    checkpoint_path = '/Users/ls/workspace/neural_operators_and_learnable_ot_for_chaos/outputs/lorenz63_no_ot_noisy/7d2bb0a0/checkpoints/_epoch_200.pt'
+    dataset_path = 'data/lorenz63/9bda2e47/train_data.npz'
+    checkpoint_path = '/Users/ls/workspace/neural_operators_and_learnable_ot_for_chaos/outputs/lorenz63_no_ot_noisy/18c2773d/checkpoints/_epoch_500.pt'
     dtype = 'float32'
     device = 'cpu'
 
@@ -243,7 +252,7 @@ if __name__ == "__main__":
             'checkpoint_path': checkpoint_path,
             'device': device,
             'dtype': dtype,
-            'rollout_steps': 100,
+            'rollout_steps': 500,
             "crop_window_size": None,
             "noise_level": 0.1,
         }

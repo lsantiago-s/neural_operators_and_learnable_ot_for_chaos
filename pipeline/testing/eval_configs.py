@@ -11,13 +11,13 @@ class EvaluateConfig:
     device: str
     dtype: str
     noise_level: float
-    rollout_steps: int
+    rollout_steps: int | None
     crop_window_size: int | None
 
     def post_init(self):
         if self.noise_level < 0:
             raise ValueError("noise_level must be non-negative")
-        if self.rollout_steps <= 0:
+        if self.rollout_steps is not None and self.rollout_steps <= 0:
             raise ValueError("rollout_steps must be positive")
         if self.crop_window_size is not None and self.crop_window_size <= 0:
             raise ValueError("crop_window_size must be positive or None")

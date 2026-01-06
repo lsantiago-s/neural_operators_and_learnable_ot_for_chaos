@@ -1,4 +1,4 @@
-from glm import isnan
+from glm import pos
 import wandb
 import torch
 import numpy as np
@@ -20,12 +20,18 @@ def increase_λ_ot(epoch: int, ot_delay: int, λ_ot: float, λ_ot_increase: floa
             λ_ot += λ_ot_increase
     return λ_ot
 
-def normalize(s: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-    mean = s.mean(dim=(0,1), keepdim=True) # s = [B, T, n]; 3 as R^3. ; f: [T*3] -> [T*3*n]. reshape [[B, T*3, n=1]]
-    std = s.std(dim=(0,1), keepdim=True).clamp_min(eps)
+def normalize(s: torch.Tensor, eps: float|None = None) -> torch.Tensor:
+    if eps is None:
+        eps = 1e-6 if s.dtype == torch.float32 else 1e-12
+    
+    mean = s.mean(dim=1, keepdim=True).detach() # s = [B, T, n]; n=3 as R^3.
+    
+    std = s.std(dim=1, keepdim=True, correction=0).detach().clamp_min(eps)
+    
     s_normalized = (s - mean) / std
-    # s_mean = s.mean(dim=1, keepdim=True) / std
-    return s_normalized
+    out = s_normalized.clamp(-10.0, 10.0)
+
+    return out
 
 def rollout(
     emulator: torch.nn.Module,
@@ -95,7 +101,6 @@ def anchored_rollout_with_short_horizon(
     if loss_predictions:
         all_preds = torch.cat(loss_predictions, dim=1)
         all_targets = torch.cat(loss_targets, dim=1)
-
         loss = loss_fn(all_targets, all_preds)
     else:
         loss = torch.tensor(0.0, device=u.device)
@@ -112,7 +117,26 @@ def anchored_rollout_with_short_horizon(
 
     assert predictions.shape == u.shape
     return predictions, loss
-    
+
+def assert_finite(x: torch.Tensor, name: str) -> None:
+    if not torch.isfinite(x).all():
+        bad = ~torch.isfinite(x)
+        idx = bad.nonzero(as_tuple=False)
+        # keep it readable: show first few offending indices
+        idx_preview = idx[:10].tolist()
+        stats = {
+            "shape": tuple(x.shape),
+            "dtype": str(x.dtype),
+            "device": str(x.device),
+            "min": float(torch.nan_to_num(x).min().item()),
+            "max": float(torch.nan_to_num(x).max().item()),
+            "mean": float(torch.nan_to_num(x).mean().item()),
+        }
+        raise FloatingPointError(
+            f"[NON-FINITE] {name}\n"
+            f"stats={stats}\n"
+            f"first_bad_indices={idx_preview}"
+        )
 
 
 def train_step(
@@ -131,14 +155,14 @@ def train_step(
     clip_summary_grad_norm: float
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, float, float, float]:
 
+    assert_finite(u, "u (input)")
+    assert_finite(param, "param (input)")
+    
     model.train()
     if f_φ.is_learnable:
         f_φ.train()
 
     model_optimizer.zero_grad()
-
-    u_hat_full_rollout = rollout(
-        emulator=model, u=u, param=param)
     
     u_hat_anchored, Lp_batch = anchored_rollout_with_short_horizon(
         emulator=model,
@@ -147,64 +171,75 @@ def train_step(
         loss_fn=Lp,
         short_horizon=rollout_steps
     )
+    assert_finite(u_hat_anchored, "u_hat_anchored (emulator output)")
 
-    # u_hat_traj = rollout(
-    #     emulator=model, u=u, param=param, rollout_steps=rollout_steps
-    # )
 
-    # Lp_batch = Lp(u, u_hat_traj)
-
+    # ------------- i) Emulator step ---------------
+    
     if use_ot:
-        s = f_φ(u)
+        f_φ.requires_grad_(False)
+        s = f_φ(u).detach()
+        u_hat_full_rollout = rollout(
+            emulator=model, u=u, param=param, rollout_steps=rollout_steps
+        )
         s_hat = f_φ(u_hat_full_rollout)
-        s_hat = s_hat
+
+        assert_finite(s, "s = f_φ(u)")
+        assert_finite(s_hat, "s_hat = f_φ(u_hat_full_rollout)")
 
         if s.dim() == 2:
             s = s.unsqueeze(1)
             s_hat = s_hat.unsqueeze(1)
             
-        if torch.isnan(s).any() or torch.isnan(s_hat).any():
-            print(f"[Warning] NaN detected in summaries")
+        if torch.isnan(s).any():
+            print(f"[Warning] NaN detected in true summaries")
+            
+        if torch.isnan(s_hat).any():
+            print(f"[Warning] NaN detected in pred summaries")
+
         ot_c_φ_batch = ot_c_φ(normalize(s), normalize(s_hat)) # s: [B, T*d , n] 
 
         model_loss = Lp_batch + λ_ot * ot_c_φ_batch
-        
-        # print(Lp_batch, ot_c_φ_batch * λ_ot)
+
     else:
         model_loss = Lp_batch
         ot_c_φ_batch = torch.tensor(0.0)
 
-    for p in f_φ.parameters():
-        p.requires_grad = False
 
     model_loss.backward()
     model_optimizer.step()
 
+
+    # --------- ii) Discriminator step -------------
+
     for p in f_φ.parameters():
         p.requires_grad = True
+        # torch.nan_to_num_(p.data, nan=0.0, posinf=0.0, neginf=0.0)
+        # p.data.clamp_(-0.01, 0.01) # This is dangerous
 
     if use_ot:
         if f_φ.is_learnable:
             summary_optimizer.zero_grad()
         s = f_φ(u)
-        u_hat_detached = u_hat_full_rollout.detach()
-        s_hat = f_φ(u_hat_detached)
+        u_hat_full_rollout = rollout(
+            emulator=model, u=u, param=param, rollout_steps=rollout_steps
+        )
+        s_hat = f_φ(u_hat_full_rollout.detach())
         ot_c_φ_batch = ot_c_φ(normalize(s), normalize(s_hat))
         summary_loss = -ot_c_φ_batch
 
         if step_f_φ and f_φ.is_learnable:
             summary_loss.backward()
-            clip_grad_norm_(f_φ.parameters(), max_norm=clip_summary_grad_norm)
             summary_optimizer.step()
     else:
         with torch.no_grad():
+            print("No OT (summaries unused)")
             s = f_φ(u)
-            u_hat_detached = u_hat_full_rollout.detach()
-            s_hat = f_φ(u_hat_detached)
+            s_hat = f_φ(u_hat_anchored.detach())
             ot_c_φ_batch = torch.tensor(0.0)
 
     return (
-        u_hat_full_rollout,
+        u_hat_anchored,
         s,
         s_hat,
         model_loss.item(),

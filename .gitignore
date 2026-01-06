@@ -7,3 +7,14 @@ __pycache__
 /output_folder
 wandb/
 .DS_Store
+/logs
+.vscode
+*.log
+*.pth
+*.pt
+*.ckpt
+/.venv
+/new
+/logs/*
+/configs/sweeps/*
+/old_results

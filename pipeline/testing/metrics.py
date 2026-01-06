@@ -1,3 +1,4 @@
+import ot
 import numpy as np
 from typing import Any
 
@@ -8,6 +9,33 @@ from typing import Any
     # Energy spectrum error:
     #  U_n = (u(t_i)_n, G(u(t_i))_n, G(G(u(t_i)))_n, ...), where n is the trajectory sample index, G is the emulator operator
     #  ESE = mean_n || FFT(U_n_true) - FFT(U_n_pred)||_1 / ||FFT(U_n_true)||_1
+
+def get_IPM(data_true: np.ndarray, data_pred: np.ndarray, p: int = 2) -> float:
+    """Compute the Integral Probability Metric (IPM) between true and predicted data.
+
+    Args:
+        data_true (np.ndarray): True data samples of shape (batch_size, n_samples, n_dims).
+        data_pred (np.ndarray): Predicted data samples of shape (batch_size, n_samples, n_dims).
+        p (int, optional): The order of the norm. Defaults to 2.
+
+    Returns:
+        ipm (float): The computed IPM value.
+    """
+    if data_true.shape != data_pred.shape:
+        raise ValueError(f"Shape mismatch: {data_true.shape} vs {data_pred.shape}")
+
+    batch_size = data_true.shape[0]
+    ipm_values = []
+
+    for b in range(batch_size):
+        M = ot.dist(data_true[b], data_pred[b], metric='euclidean')  # Cost matrix
+        a = np.ones((data_true.shape[1],)) / data_true.shape[1]  # Uniform distribution
+        b_dist = np.ones((data_pred.shape[1],)) / data_pred.shape[1]  # Uniform distribution
+        W = ot.emd(a, b_dist, M)  # Optimal transport plan
+        ipm_b = np.sum(W * M ** p) ** (1 / p)
+        ipm_values.append(ipm_b)
+
+    return float(np.mean(ipm_values))
 
 def get_histogram(data: np.ndarray, num_bins: int, density: bool = True) -> list[tuple[np.ndarray[tuple[int, int], np.dtype[Any]], np.ndarray[tuple[int, int], np.dtype[Any]]]]:
     """Compute histogram of the data.
@@ -35,6 +63,7 @@ def get_histogram(data: np.ndarray, num_bins: int, density: bool = True) -> list
         bin_centers = np.zeros((n_dims, num_bins))
         counts = np.zeros((n_dims, num_bins))
         for dim in range(n_dims):
+            
             hist_counts, bin_edges = np.histogram(data[b, :, dim], bins=num_bins, density=density)
             counts[dim] = hist_counts
             bin_centers[dim] = 0.5 * (bin_edges[:-1] + bin_edges[1:])
@@ -128,6 +157,7 @@ def compute_trajectory_errors(u_true, u_hat) -> dict[str, Any]:
     H_true = get_histogram(u_true, num_bins=k, density=True)
     H_hat = get_histogram(u_hat, num_bins=k, density=True)
     hist_error = compute_histogram_error(H_true, H_hat)
+    emd = get_IPM(u_true, u_hat, p=2)
 
 
     return {
@@ -145,6 +175,7 @@ def compute_trajectory_errors(u_true, u_hat) -> dict[str, Any]:
         'l_infinity_error': l_infinity_error,
         'energy_spectrum': energy_spectrum_error,
         'histogram_error': hist_error,
+        'ipm': emd
     }
 
 def compute_summary_errors(s_true, s_hat) -> dict[str, Any]:

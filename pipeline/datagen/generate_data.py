@@ -4,9 +4,9 @@ import json
 import base64
 import logging
 from pathlib import Path
-from trajectory_generator import DataGenerator
-from config import DataGenConfig
-from save import save_npz
+from pipeline.datagen.trajectory_generator import DataGenerator
+from pipeline.datagen.config import DataGenConfig
+from pipeline.datagen.save import save_npz
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
