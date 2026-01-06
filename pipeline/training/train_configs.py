@@ -1,5 +1,5 @@
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
@@ -44,13 +44,27 @@ class TrainConfig:
     def post_init(self):
         pass
 
-def get_train_configs(config_paths: list[Path]) -> dict[str, TrainConfig]:
-    with open(config_paths[0], 'r') as f:
-        train_config_dict = json.load(f)
-        train_config_obj = TrainConfig(**train_config_dict)
-        train_config_obj.post_init()
+def _filter_to_dataclass_keys(raw: dict[str, Any]) -> dict[str, Any]:
+    allowed = {f.name for f in fields(TrainConfig)}
+    return {k: v for k, v in raw.items() if k in allowed}
 
-    train_config = {
-        "exp_config": train_config_obj,
-    }
-    return train_config
+def get_train_configs(config_paths: list[Path]) -> dict[str, TrainConfig]:
+    with config_paths[0].open("r", encoding="utf-8") as f:
+        raw: dict[str, Any] = json.load(f)
+
+    cfg: dict[str, Any] = dict(raw)
+    nested = cfg.pop("train_config", None)
+    if isinstance(nested, dict):
+        cfg.update(nested)  # nested overrides win
+
+    cfg = _filter_to_dataclass_keys(cfg)
+
+    missing = [f.name for f in fields(TrainConfig) if f.name not in cfg]
+    if missing:
+        raise ValueError(
+            f"Config missing required keys: {missing}\n"
+            f"Config file: {config_paths[0]}"
+        )
+
+    train_config_obj = TrainConfig(**cfg)
+    return {"exp_config": train_config_obj}
