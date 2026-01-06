@@ -33,9 +33,9 @@ pick_port() {
 
 # ---------- GRID (edit this block) ----------
 SEEDS=(0 1 2)
-OT_PENALTIES=(0.0 1.0)        # goes to .train_config.ot_penalty
-NOISE_LEVELS=(0.00 0.05)      # goes to .train_config.noise_level
-SUMMARY_TYPES=("identity" "projection", "mlp")  # .train_config.summary_type
+OT_PENALTIES=(1.0 0.0)        # goes to .train_config.ot_penalty
+NOISE_LEVELS=(0.00 0.1 0.3)      # goes to .train_config.noise_level
+SUMMARY_TYPES=("mlp" "identity" "projection")  # .train_config.summary_type
 PROJECTION_STATES=(0 1 2)     # only used when summary_type=projection
 
 # number of concurrent runs on local (macOS). 1 = strict queue.
@@ -78,7 +78,12 @@ run_single() {
   echo "Log:    ${log_file}"
 
   # Per-run W&B tags (optional)
-  export WANDB_TAGS="${WANDB_TAGS:-},${run_name}"
+if [[ -n "${WANDB_TAGS:-}" ]]; then
+  export WANDB_TAGS="${WANDB_TAGS},${run_name}"
+else
+  export WANDB_TAGS="${run_name}"
+fi
+
 
   if [[ -n "${SLURM_JOB_ID:-}" ]]; then
     echo "Running on SLURM (job ${SLURM_JOB_ID})"
